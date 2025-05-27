@@ -82,6 +82,7 @@ http://your-server-ip:8088
 ![image](https://github.com/user-attachments/assets/428b0109-92da-4603-b65c-c1fc60006021)
 
 ---
-![image](https://github.com/user-attachments/assets/606ca5e5-734d-47c5-8c3d-272333db7f0e)
+![image](https://github.com/user-attachments/assets/acb5d248-f543-4b6e-9e69-1013789cb2c1)
+
 
 
