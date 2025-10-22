@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import subprocess
 import time
 from typing import List, Dict, Tuple
@@ -9,19 +11,18 @@ import psutil
 import os
 import json
 import random
-import requests  
-import re 
-import pandas as pd 
+import requests  # For API calls to get latest tick
+import re  # For regex to extract hash from output
+import pandas as pd  # For Excel file handling (optional)
 
 # Configuration
 NODES = [
     "NODE1",
     "NODE2",
-    "NODE3",
-    "NODE4"
+    "NODE3"
 ]
 
-QUBIC_CLI_PATH = "C:/Users/user/Desktop/qubic-cli/"
+QUBIC_CLI_PATH = "qubic-cli.exe"
 
 # Hardcoded wallet information
 DEFAULT_SEED = "SEED"
@@ -127,6 +128,26 @@ def parse_pasted_data(data_text):
         logging.error(f"Error parsing pasted data: {str(e)}")
         raise
 
+def load_excel_data(excel_file):
+    """Load payment data from Excel file"""
+    try:
+        df = pd.read_excel(excel_file)
+        payment_data = []
+        
+        # Assuming columns are: 'wallet_address', 'amount', and optionally 'sols'
+        for idx, row in df.iterrows():
+            payment_data.append({
+                'wallet_address': str(row['wallet_address']).strip(),
+                'amount': int(row['amount']),
+                'sols': str(row.get('sols', '')) if 'sols' in df.columns else None
+            })
+        
+        logging.info(f"Loaded {len(payment_data)} payment records from Excel file")
+        return payment_data
+    except Exception as e:
+        logging.error(f"Error loading Excel file: {str(e)}")
+        raise
+
 class QUSSender:
     def __init__(self, source_wallet, payment_data):
         self.active_nodes = NODES.copy()
@@ -152,19 +173,24 @@ class QUSSender:
         self.failed_tx_file = "failed_transactions.json"
 
     def get_next_node(self) -> str:
-        """Use current node until failure, then switch to next available node"""
-        try:
-            return self.active_nodes[self.current_node_index]
-        except Exception as e:
-            logging.error(f"Current node failed: {str(e)}")
-            # Move to next node only on failure
-            self.current_node_index += 1
-            if self.current_node_index >= len(self.active_nodes):
-                self.current_node_index = 0
-                if not self.active_nodes:
-                    raise Exception("No active nodes available")
-            
-            return self.active_nodes[self.current_node_index]
+        """Get current node and switch to next if current is unavailable"""
+        if not self.active_nodes:
+            raise Exception("No active nodes available")
+        
+        # Ensure index is within bounds
+        if self.current_node_index >= len(self.active_nodes):
+            self.current_node_index = 0
+        
+        return self.active_nodes[self.current_node_index]
+
+    def switch_to_next_node(self):
+        """Switch to the next available node"""
+        if not self.active_nodes:
+            raise Exception("No active nodes available")
+        
+        # Move to next node in circular logic
+        self.current_node_index = (self.current_node_index + 1) % len(self.active_nodes)
+        logging.info(f"Switched to node: {self.active_nodes[self.current_node_index]}")
 
     def extract_tx_hash(self, output_text):
         """Extract transaction hash from the transaction output"""
@@ -191,6 +217,8 @@ class QUSSender:
                 str(tick)
             ]
             
+            logging.info(f"Attempting transaction with node: {node}")
+            
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.active_processes.add(process.pid)
             
@@ -214,41 +242,50 @@ class QUSSender:
             
             # Handle connection failures
             if "Failed to connect" in stderr_text or "error -1" in stderr_text:
-                logging.warning(f"Node {node} failed, switching to next node")
-                if node in self.active_nodes:
-                    self.active_nodes.remove(node)
-                    self.current_node_index += 1
-                    if self.current_node_index >= len(self.active_nodes):
-                        self.current_node_index = 0
+                logging.warning(f"Node {node} connection failed")
+                
+                # Switch to next node for retry
+                self.switch_to_next_node()
                 
                 # Retry with new node if we haven't exceeded max retries
                 if retry_count < max_retries:
-                    logging.info(f"Retrying transaction to {target_address} (Attempt {retry_count + 1}/{max_retries})")
+                    logging.info(f"Retrying transaction to {target_address} with next node (Attempt {retry_count + 2}/{max_retries + 1})")
                     return self.send_transaction(target_address, amount, tick, retry_count + 1, max_retries)
                 
+                logging.error(f"Max retries ({max_retries}) reached for transaction to {target_address}")
                 return False, None
             
             # Any other failure
             logging.error(f"Transaction failed: {stderr_text}")
             if retry_count < max_retries:
-                logging.info(f"Retrying transaction to {target_address} (Attempt {retry_count + 1}/{max_retries})")
+                # Try next node on any failure
+                self.switch_to_next_node()
+                logging.info(f"Retrying transaction to {target_address} (Attempt {retry_count + 2}/{max_retries + 1})")
                 return self.send_transaction(target_address, amount, tick, retry_count + 1, max_retries)
             
             return False, None
             
         except subprocess.TimeoutExpired:
-            logging.error("Transaction timed out")
+            logging.error(f"Transaction timed out on node {self.active_nodes[self.current_node_index]}")
             if process:
                 process.kill()
+            
+            # Switch to next node on timeout
+            self.switch_to_next_node()
+            
             if retry_count < max_retries:
-                logging.info(f"Retrying transaction to {target_address} (Attempt {retry_count + 1}/{max_retries})")
+                logging.info(f"Retrying transaction to {target_address} (Attempt {retry_count + 2}/{max_retries + 1})")
                 return self.send_transaction(target_address, amount, tick, retry_count + 1, max_retries)
             
             return False, None
         except Exception as e:
             logging.error(f"Error processing transaction: {str(e)}")
+            
+            # Switch to next node on exception
+            self.switch_to_next_node()
+            
             if retry_count < max_retries:
-                logging.info(f"Retrying transaction to {target_address} (Attempt {retry_count + 1}/{max_retries})")
+                logging.info(f"Retrying transaction to {target_address} (Attempt {retry_count + 2}/{max_retries + 1})")
                 return self.send_transaction(target_address, amount, tick, retry_count + 1, max_retries)
             
             return False, None
@@ -270,6 +307,8 @@ class QUSSender:
                 '-checktxontick', str(self.current_tx_tick),
                 self.current_tx_hash
             ]
+            
+            logging.info(f"Verifying transaction with node: {node}")
             
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             stdout, stderr = process.communicate(timeout=30)
@@ -293,22 +332,142 @@ class QUSSender:
             if "Found tx" in stdout_text and "Received end response message" in stdout_text:
                 logging.info(f"Transaction {self.current_tx_hash} confirmed on tick {self.current_tx_tick}")
                 return True  # Transaction was accepted
+            
+            # Handle connection failures during verification
+            if "Failed to connect" in stderr_text or "error -1" in stderr_text:
+                logging.warning(f"Node connection failed during verification")
+                self.switch_to_next_node()
                 
+                if retry_count < max_retries:
+                    logging.info(f"Retrying verification for {self.current_tx_hash} (Attempt {retry_count + 2}/{max_retries + 1})")
+                    return self.verify_transaction(retry_count + 1, max_retries)
+            
             # Handle other responses
             logging.warning(f"Unexpected response for tx verification: {stdout_text}")
             if retry_count < max_retries:
-                logging.info(f"Retrying verification for {self.current_tx_hash} (Attempt {retry_count + 1}/{max_retries})")
+                self.switch_to_next_node()
+                logging.info(f"Retrying verification for {self.current_tx_hash} (Attempt {retry_count + 2}/{max_retries + 1})")
                 return self.verify_transaction(retry_count + 1, max_retries)
                 
             return False  # Consider as failed after max retries
             
         except Exception as e:
             logging.error(f"Error verifying transaction: {str(e)}")
+            self.switch_to_next_node()
+            
             if retry_count < max_retries:
-                logging.info(f"Retrying verification for {self.current_tx_hash} (Attempt {retry_count + 1}/{max_retries})")
+                logging.info(f"Retrying verification for {self.current_tx_hash} (Attempt {retry_count + 2}/{max_retries + 1})")
                 return self.verify_transaction(retry_count + 1, max_retries)
                 
             return False  # Consider as failed after max retries
+
+    def verify_specific_transaction(self, tx_hash, tick, retry_count=0, max_retries=3):
+        """Verify a specific transaction by hash and tick"""
+        if not tx_hash or not tick:
+            logging.warning("Invalid transaction hash or tick for verification")
+            return False
+            
+        try:
+            node = self.get_next_node()
+            cmd = [
+                QUBIC_CLI_PATH,
+                '-nodeip', node,
+                '-checktxontick', str(tick),
+                tx_hash
+            ]
+            
+            logging.info(f"Verifying transaction {tx_hash} on tick {tick} with node: {node}")
+            
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = process.communicate(timeout=30)
+            stdout_text = stdout.decode()
+            stderr_text = stderr.decode()
+            
+            # Check if transaction was accepted
+            if "Found tx" in stdout_text and "Received end response message" in stdout_text:
+                logging.info(f"Transaction {tx_hash} confirmed on tick {tick}")
+                return True
+                
+            # Check if transaction not found
+            if "Can NOT find tx" in stdout_text:
+                logging.info(f"Transaction {tx_hash} not found on tick {tick}")
+                return False
+            
+            # Handle connection failures during verification
+            if "Failed to connect" in stderr_text or "error -1" in stderr_text:
+                logging.warning(f"Node connection failed during verification")
+                self.switch_to_next_node()
+                
+                if retry_count < max_retries:
+                    return self.verify_specific_transaction(tx_hash, tick, retry_count + 1, max_retries)
+            
+            # Handle other responses
+            if retry_count < max_retries:
+                self.switch_to_next_node()
+                return self.verify_specific_transaction(tx_hash, tick, retry_count + 1, max_retries)
+                
+            return False
+            
+        except Exception as e:
+            logging.error(f"Error verifying transaction {tx_hash}: {str(e)}")
+            self.switch_to_next_node()
+            
+            if retry_count < max_retries:
+                return self.verify_specific_transaction(tx_hash, tick, retry_count + 1, max_retries)
+                
+            return False
+
+    def reverify_failed_transactions(self, successful_transactions):
+        """Reverify all failed transactions to catch any that actually succeeded"""
+        if not self.failed_transactions:
+            return
+        
+        print("\n" + "="*60)
+        print("FINAL REVERIFICATION OF FAILED TRANSACTIONS")
+        print("="*60)
+        print(f"Reverifying {len(self.failed_transactions)} failed transactions...")
+        print("This may take a few moments...\n")
+        
+        actually_successful = []
+        still_failed = []
+        
+        for idx, failed_tx in enumerate(self.failed_transactions):
+            tx_hash = failed_tx.get('tx_hash')
+            tick = failed_tx.get('tick')
+            wallet_address = failed_tx['wallet_address']
+            amount = failed_tx['amount']
+            
+            print(f"Reverifying {idx+1}/{len(self.failed_transactions)}: {wallet_address[:20]}...")
+            
+            # Skip transactions without hash (they never made it to the network)
+            if not tx_hash:
+                print(f"  ✗ No transaction hash - transaction never sent")
+                still_failed.append(failed_tx)
+                continue
+            
+            # Verify the transaction
+            is_confirmed = self.verify_specific_transaction(tx_hash, tick)
+            
+            if is_confirmed:
+                print(f"  ✓ Transaction actually succeeded!")
+                logging.info(f"Reverification: Transaction {tx_hash} to {wallet_address} was actually successful")
+                actually_successful.append(failed_tx)
+            else:
+                print(f"  ✗ Transaction still failed")
+                still_failed.append(failed_tx)
+            
+            time.sleep(1)  # Brief pause between verifications
+        
+        # Update the lists
+        if actually_successful:
+            print(f"\n{len(actually_successful)} transaction(s) were actually successful!")
+            # Add to successful transactions list
+            successful_transactions.extend(actually_successful)
+            
+        # Update failed transactions list to only include truly failed ones
+        self.failed_transactions = still_failed
+        
+        print(f"After reverification: {len(successful_transactions)} successful, {len(still_failed)} failed\n")
 
     def save_failed_transactions(self):
         """Save failed transaction data to a file"""
@@ -381,6 +540,8 @@ class QUSSender:
                 return
             
             print(f"\nProcessing transactions one at a time, waiting for each tick to complete")
+            print(f"Available nodes: {', '.join(self.active_nodes)}")
+            print(f"Starting with node: {self.active_nodes[self.current_node_index]}\n")
             
             # List to track successful transactions
             successful_transactions = []
@@ -468,15 +629,19 @@ class QUSSender:
                 # Brief pause between transactions
                 time.sleep(2)
             
+            # Before finalizing results, reverify all failed transactions
+            if self.failed_transactions:
+                self.reverify_failed_transactions(successful_transactions)
+            
             # Create transaction report
             if successful_transactions:
                 print(f"\nCreating transaction report for {len(successful_transactions)} successful transactions...")
                 self.create_transaction_report(successful_transactions)
             
-            # After all transactions, check if we have any failed ones
+            # After all transactions and reverification, check if we have any failed ones
             if self.failed_transactions:
                 print(f"\nCompleted with {len(successful_transactions)} successful and {len(self.failed_transactions)} failed transactions")
-                print("Failed transactions:")
+                print("\nFailed transactions:")
                 for failed in self.failed_transactions:
                     print(f"  Address: {failed['wallet_address']}, Amount: {failed['amount']} QUS")
                 
@@ -566,11 +731,11 @@ if __name__ == "__main__":
         
         # Show sample of payments
         print("\nSample of payments to be processed:")
-        for i, payment in enumerate(payment_data[:500]):
+        for i, payment in enumerate(payment_data[:5]):
             print(f"  {i+1}. Address: {payment['wallet_address']}, Amount: {payment['amount']} QUS")
         
-        if len(payment_data) > 500:
-            print(f"  ...and {len(payment_data) - 500} more")
+        if len(payment_data) > 5:
+            print(f"  ...and {len(payment_data) - 5} more")
         
         proceed = input("\nProceed with these settings? (y/n): ")
         if proceed.lower() != 'y':
