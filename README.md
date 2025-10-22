@@ -1,8 +1,4 @@
-# 🌊Qubic Computors Community Tools🌊
+# 🌊QUBIC-COMPUTOR-TOOLS🌊
 
-This repository contains a set of open-source tools created to support the Qubic computors community🍹
+### This repository provides a collection of open-source tools designed to support and enhance the Qubic Computors community.
 
-They were built to simplify tracking, automation, and visibility for miners and enthusiasts and are now shared freely to help others contribute, learn, and grow with Qubic 💖
-
-
-### **By JETSKI**🏝️🌊🥥
